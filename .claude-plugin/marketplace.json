@@ -1,5 +1,5 @@
 {
-  "name": "cocoindex-skills",
+  "name": "cocoindex-claude-plugins",
   "owner": {
     "name": "CocoIndex Team",
     "email": "team@cocoindex.io"
@@ -10,7 +10,7 @@
   },
   "plugins": [
     {
-      "name": "cocoindex",
+      "name": "cocoindex-skills",
       "description": "Comprehensive toolkit for developing with the CocoIndex library - build data transformation pipelines, create custom functions, and operate flows via CLI or API",
       "source": "./",
       "strict": false,
