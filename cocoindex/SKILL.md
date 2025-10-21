@@ -617,7 +617,6 @@ chunk["embedding"] = chunk["text"].transform(
     cocoindex.functions.EmbedText(
         api_type=cocoindex.LlmApiType.OPENAI,
         model="text-embedding-3-small",
-        dimensions=1024  # Optional: specify dimensions
     )
 )
 ```
