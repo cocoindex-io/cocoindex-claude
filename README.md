@@ -8,6 +8,7 @@ Install this skill in Claude Code by running:
 
 ```
 /plugin marketplace add cocoindex-io/cocoindex-claude
+/plugin install cocoindex-skills@cocoindex
 ```
 
 ## What is CocoIndex?
