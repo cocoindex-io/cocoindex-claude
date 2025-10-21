@@ -1,6 +1,11 @@
 # CocoIndex Claude Code Skill
 
-A Claude Code skill for developing with the CocoIndex library - build data transformation pipelines, create custom functions, and operate flows via CLI or API.
+A Claude Code skill for developing with the [CocoIndex library](https://github.com/cocoindex-io/cocoindex) - build data transformation pipelines, create custom functions, and operate flows via CLI or API. 
+
+Star [CocoIndex]((https://github.com/cocoindex-io/cocoindex)) [![GitHub](https://img.shields.io/github/stars/cocoindex-io/cocoindex?color=5B5BD6)](https://github.com/cocoindex-io/cocoindex) if you like it!
+
+
+![CocoIndex Skill-VEED](https://github.com/user-attachments/assets/31cdfac0-6ecc-4c36-b8c4-a1c99ceff176)
 
 ## Installation
 
