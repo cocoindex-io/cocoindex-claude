@@ -2,7 +2,7 @@
   "name": "cocoindex",
   "owner": {
     "name": "CocoIndex Team",
-    "email": "team@cocoindex.io"
+    "email": "support@cocoindex.io"
   },
   "metadata": {
     "description": "CocoIndex development skills",
@@ -15,7 +15,8 @@
       "source": "./",
       "strict": false,
       "skills": [
-        "./cocoindex"
+        "./cocoindex",
+        "./cocoindex-v1"
       ]
     }
   ]
