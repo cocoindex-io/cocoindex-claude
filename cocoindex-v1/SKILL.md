@@ -187,7 +187,11 @@ def coco_lifespan(builder: coco.EnvironmentBuilder):
     embedder = SentenceTransformerEmbedder("all-MiniLM-L6-v2")
     builder.provide(EMBEDDER, embedder)
     yield
+```
 
+The `@coco.lifespan` decorator registers the function to the default CocoIndex environment, which is shared among all apps by default.
+
+```python
 @coco.function
 def process_item(text: str) -> None:
     embedder = coco.use_context(EMBEDDER)
