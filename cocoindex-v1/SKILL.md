@@ -194,6 +194,25 @@ def process_item(text: str) -> None:
     embedding = embedder.embed(text)
 ```
 
+### 6. ID Generation
+
+Generate stable, unique identifiers that persist across incremental updates:
+
+```python
+from cocoindex.resources.id import generate_id, IdGenerator
+
+# Deterministic: same dep → same ID
+chunk_id = generate_id(chunk.content)
+
+# Always distinct: each call → new ID, even with same dep
+id_gen = IdGenerator()
+for chunk in chunks:
+    chunk_id = id_gen.next_id(chunk.content)
+    table.declare_row(row=Row(id=chunk_id, content=chunk.content))
+```
+
+Use `generate_id(dep)` when same content should yield same ID. Use `IdGenerator` when you need distinct IDs even for duplicate content. See [ID Generation docs](https://cocoindex.io/docs-v1/resource_types#id-generation) for details.
+
 ## Common Pipeline Patterns
 
 ### Pattern 1: File Transformation
@@ -241,6 +260,7 @@ import cocoindex.asyncio as coco_aio
 from cocoindex.connectors import localfs, postgres
 from cocoindex.ops.text import RecursiveSplitter
 from cocoindex.ops.sentence_transformers import SentenceTransformerEmbedder
+from cocoindex.resources.id import IdGenerator
 from numpy.typing import NDArray
 
 PG_DB = coco.ContextKey[postgres.PgDatabase]("pg_db")
@@ -249,8 +269,8 @@ _splitter = RecursiveSplitter()
 
 @dataclass
 class Embedding:
+    id: int  # Generated stable ID
     filename: str
-    location: str
     text: str
     embedding: Annotated[NDArray, _embedder]  # Auto-infer dimensions
     start_line: int
@@ -263,12 +283,11 @@ async def coco_lifespan(builder: coco_aio.EnvironmentBuilder) -> AsyncIterator[N
         yield
 
 @coco.function(memo=True)
-async def process_chunk(filename, chunk, table):
-    location = f"{chunk.start.char_offset}-{chunk.end.char_offset}"
+async def process_chunk(chunk_id, filename, chunk, table):
     table.declare_row(
         row=Embedding(
+            id=chunk_id,
             filename=str(filename),
-            location=location,
             text=chunk.text,
             embedding=await _embedder.embed_async(chunk.text),
             start_line=chunk.start.line,
@@ -280,7 +299,11 @@ async def process_chunk(filename, chunk, table):
 async def process_file(file, table):
     text = file.read_text()
     chunks = _splitter.split(text, chunk_size=1000, min_chunk_size=300, chunk_overlap=200)
-    await asyncio.gather(*(process_chunk(file.file_path.path, chunk, table) for chunk in chunks))
+    id_gen = IdGenerator()  # Generate stable IDs for each chunk
+    await asyncio.gather(*(
+        process_chunk(id_gen.next_id(chunk.text), file.file_path.path, chunk, table)
+        for chunk in chunks
+    ))
 
 @coco.function
 def app_main(sourcedir):
@@ -289,7 +312,7 @@ def app_main(sourcedir):
         coco.component_subpath("setup", "table"),
         target_db.declare_table_target,
         table_name="embeddings",
-        table_schema=postgres.TableSchema(Embedding, primary_key=["filename", "location"]),
+        table_schema=postgres.TableSchema(Embedding, primary_key=["id"]),
     ).result()
 
     files = localfs.walk_dir(sourcedir, recursive=True)
