@@ -105,7 +105,6 @@ Walk files → Chunk text → Embed chunks → Store in vector DB
 ### Implementation
 
 ```python
-import asyncio
 import pathlib
 from dataclasses import dataclass
 from typing import AsyncIterator, Annotated
@@ -113,10 +112,11 @@ from typing import AsyncIterator, Annotated
 import cocoindex as coco
 import cocoindex.asyncio as coco_aio
 from cocoindex.connectors import localfs, postgres
-from cocoindex.ops.text import RecursiveSplitter, detect_code_language
+from cocoindex.ops.text import RecursiveSplitter
 from cocoindex.ops.sentence_transformers import SentenceTransformerEmbedder
 from cocoindex.resources.file import FileLike, PatternFilePathMatcher
 from cocoindex.resources.chunk import Chunk
+from cocoindex.resources.id import IdGenerator
 from numpy.typing import NDArray
 
 
@@ -129,13 +129,13 @@ _splitter = RecursiveSplitter()
 
 
 @dataclass
-class Embedding:
+class DocEmbedding:
+    id: int
     filename: str
-    location: str
     text: str
     embedding: Annotated[NDArray, _embedder]
-    start_line: int
-    end_line: int
+    chunk_start: int
+    chunk_end: int
 
 
 @coco_aio.lifespan
@@ -146,22 +146,22 @@ async def coco_lifespan(builder: coco_aio.EnvironmentBuilder) -> AsyncIterator[N
         yield
 
 
-@coco.function(memo=True)
+@coco.function
 async def process_chunk(
-    filename: pathlib.PurePath,
     chunk: Chunk,
-    table: postgres.TableTarget,
+    filename: pathlib.PurePath,
+    id_gen: IdGenerator,
+    table: postgres.TableTarget[DocEmbedding],
 ) -> None:
     """Embed a single chunk."""
-    location = f"{chunk.start.char_offset}-{chunk.end.char_offset}"
     table.declare_row(
-        row=Embedding(
+        row=DocEmbedding(
+            id=await id_gen.next_id(chunk.text),
             filename=str(filename),
-            location=location,
             text=chunk.text,
-            embedding=await _embedder.embed_async(chunk.text),
-            start_line=chunk.start.line,
-            end_line=chunk.end.line,
+            embedding=await _embedder.embed(chunk.text),
+            chunk_start=chunk.start.char_offset,
+            chunk_end=chunk.end.char_offset,
         ),
     )
 
@@ -169,45 +169,30 @@ async def process_chunk(
 @coco.function(memo=True)
 async def process_file(
     file: FileLike,
-    table: postgres.TableTarget,
+    table: postgres.TableTarget[DocEmbedding],
 ) -> None:
     """Chunk and embed a single file."""
     text = file.read_text()
+    chunks = _splitter.split(text, chunk_size=1000, chunk_overlap=200)
+    id_gen = IdGenerator()
 
-    # Detect language for syntax-aware chunking
-    language = detect_code_language(filename=str(file.file_path.path.name))
-
-    # Split into chunks
-    chunks = _splitter.split(
-        text,
-        chunk_size=1000,
-        min_chunk_size=300,
-        chunk_overlap=200,
-        language=language,
-    )
-
-    # Process chunks in parallel
-    await asyncio.gather(
-        *(process_chunk(file.file_path.path, chunk, table) for chunk in chunks)
-    )
+    # Process chunks concurrently within this component
+    await coco_aio.map(process_chunk, chunks, file.file_path.path, id_gen, table)
 
 
 @coco.function
-def app_main(sourcedir: pathlib.Path) -> None:
+async def app_main(sourcedir: pathlib.Path) -> None:
     """Main processing function."""
-    # Get database from context
     target_db = coco.use_context(PG_DB)
 
-    # Set up target table
-    target_table = coco.mount_run(
-        coco.component_subpath("setup", "table"),
-        target_db.declare_table_target,
+    # Mount target table (subpath is automatic)
+    target_table = await target_db.mount_table_target(
         table_name="embeddings",
-        table_schema=postgres.TableSchema(
-            Embedding,
-            primary_key=["filename", "location"],
+        table_schema=await postgres.TableSchema.from_class(
+            DocEmbedding,
+            primary_key=["id"],
         ),
-    ).result()
+    )
 
     # Walk source files
     files = localfs.walk_dir(
@@ -219,14 +204,8 @@ def app_main(sourcedir: pathlib.Path) -> None:
         ),
     )
 
-    # Process each file
-    for file in files:
-        coco.mount(
-            coco.component_subpath("file", str(file.file_path.path)),
-            process_file,
-            file,
-            target_table,
-        )
+    # Mount one component per file
+    await coco_aio.mount_each(process_file, files.items(), target_table)
 
 
 app = coco_aio.App(
@@ -238,10 +217,11 @@ app = coco_aio.App(
 
 ### Key Points
 
-- **Async processing**: Use `async`/`await` for I/O-bound operations
-- **Chunk-level memoization**: `process_chunk` with `memo=True` avoids re-embedding unchanged chunks
-- **Language-aware splitting**: Detects language and uses syntax-aware chunking
-- **Composite primary key**: `["filename", "location"]` for unique chunk identification
+- **`mount_table_target()`**: Convenience method replaces manual `mount_run` + `component_subpath("setup", ...)` pattern
+- **`mount_each()`**: Sugar for mounting one component per file; uses `files.items()` for `(key, value)` pairs
+- **`map()`**: Concurrent execution within a component; replaces `asyncio.gather`
+- **`IdGenerator`**: Generates stable unique IDs for chunks across incremental updates
+- **File-level memoization**: `process_file` with `memo=True` skips unchanged files entirely
 - **Resource sharing**: Use `ContextKey` and `use_context()` for shared resources
 
 ---
@@ -326,16 +306,14 @@ async def app_main() -> None:
     source_db = coco.use_context(SOURCE_DB)
     target_db = coco.use_context(TARGET_DB)
 
-    # Set up target table
-    target_table = coco.mount_run(
-        coco.component_subpath("setup", "target_table"),
-        target_db.declare_table_target,
+    # Mount target table (subpath is automatic)
+    target_table = await target_db.mount_table_target(
         table_name="target_records",
-        table_schema=postgres.TableSchema(
+        table_schema=await postgres.TableSchema.from_class(
             TargetRecord,
             primary_key=["id"],
         ),
-    ).result()
+    )
 
     # Read from source table
     source = postgres.PgTableSource(
@@ -474,28 +452,25 @@ async def extract_and_store(
 
 
 @coco.function
-def app_main(input_texts: list[str]) -> None:
+async def app_main(input_texts: list[str]) -> None:
     """Main processing function."""
     # Get database from context
     target_db = coco.use_context(PG_DB)
 
-    # Set up target tables
-    messages_table = coco.mount_run(
-        coco.component_subpath("setup", "messages_table"),
-        target_db.declare_table_target,
+    # Mount target tables (subpaths are automatic)
+    messages_table = await target_db.mount_table_target(
         table_name="messages",
-        table_schema=postgres.TableSchema(Message, primary_key=["id"]),
-    ).result()
-
-    topics_table = coco.mount_run(
-        coco.component_subpath("setup", "topics_table"),
-        target_db.declare_table_target,
-        table_name="topics",
-        table_schema=postgres.TableSchema(
-            Topic,
-            primary_key=["message_id", "name"],
+        table_schema=await postgres.TableSchema.from_class(
+            Message, primary_key=["id"],
         ),
-    ).result()
+    )
+
+    topics_table = await target_db.mount_table_target(
+        table_name="topics",
+        table_schema=await postgres.TableSchema.from_class(
+            Topic, primary_key=["message_id", "name"],
+        ),
+    )
 
     # Process each input
     for idx, text in enumerate(input_texts):
@@ -605,13 +580,14 @@ coco.component_subpath("idx", idx)    # Index may change when items inserted
 ### Hierarchical Paths
 
 ```python
-# Organize with hierarchy
-with coco.component_subpath("setup"):
-    # Setup operations
-    table = coco.mount_run(...)
+# Target setup — subpath is automatic with convenience methods
+table = await target_db.mount_table_target(...)
 
+# Processing — mount_each uses keys as component subpaths
+await coco_aio.mount_each(process_item, items.items(), table)
+
+# Or use manual hierarchy
 with coco.component_subpath("processing"):
-    # Processing operations
     for item in items:
         coco.mount(coco.component_subpath(item.id), ...)
 ```

@@ -82,16 +82,14 @@ class Embedding:
     text: str
     vector: Annotated[NDArray, embedder]  # Auto-infer dimensions
 
-# Declare table
-target_table = coco.mount_run(
-    coco.component_subpath("setup", "table"),
-    target_db.declare_table_target,
+# Mount table target (async convenience)
+target_table = await target_db.mount_table_target(
     table_name="embeddings",
-    table_schema=postgres.TableSchema(
+    table_schema=await postgres.TableSchema.from_class(
         Embedding,
         primary_key=["id"],
     ),
-).result()
+)
 
 # Declare rows
 target_table.declare_row(
@@ -152,16 +150,14 @@ class Embedding:
     text: str
     vector: Annotated[NDArray, embedder]
 
-# Declare table
-target_table = coco.mount_run(
-    coco.component_subpath("setup", "table"),
-    target_db.declare_table_target,
+# Mount table target (async convenience)
+target_table = await target_db.mount_table_target(
     table_name="embeddings",
-    table_schema=sqlite.TableSchema(
+    table_schema=await sqlite.TableSchema.from_class(
         Embedding,
         primary_key=["id"],
     ),
-).result()
+)
 
 # Declare rows
 target_table.declare_row(
@@ -222,16 +218,14 @@ class Embedding:
     text: str
     vector: Annotated[NDArray, embedder]
 
-# Declare table
-target_table = coco.mount_run(
-    coco.component_subpath("setup", "table"),
-    target_db.declare_table_target,
+# Mount table target (async convenience)
+target_table = await target_db.mount_table_target(
     table_name="embeddings",
-    table_schema=lancedb.TableSchema(
+    table_schema=await lancedb.TableSchema.from_class(
         Embedding,
         primary_key=["id"],
     ),
-).result()
+)
 
 # Declare rows
 target_table.declare_row(
@@ -281,10 +275,8 @@ def coco_lifespan(builder: coco.EnvironmentBuilder):
 ```python
 from qdrant_client.models import PointStruct
 
-# Declare collection
-collection = coco.mount_run(
-    coco.component_subpath("setup", "collection"),
-    target_db.declare_collection_target,
+# Mount collection target (async convenience)
+collection = await target_db.mount_collection_target(
     collection_name="embeddings",
     schema=qdrant.CollectionSchema(
         vectors=qdrant.QdrantVectorDef(
@@ -292,7 +284,7 @@ collection = coco.mount_run(
             distance="cosine",
         ),
     ),
-).result()
+)
 
 # Declare points
 collection.declare_point(
@@ -307,10 +299,8 @@ collection.declare_point(
 ### As Target (Named Vectors)
 
 ```python
-# Declare collection with named vectors
-collection = coco.mount_run(
-    coco.component_subpath("setup", "collection"),
-    target_db.declare_collection_target,
+# Mount collection with named vectors (async convenience)
+collection = await target_db.mount_collection_target(
     collection_name="multimodal",
     schema=qdrant.CollectionSchema(
         vectors={
@@ -318,7 +308,7 @@ collection = coco.mount_run(
             "image": qdrant.QdrantVectorDef(schema=image_embedder),
         },
     ),
-).result()
+)
 
 # Declare points
 collection.declare_point(
@@ -402,13 +392,8 @@ localfs.declare_file(
 ### As Target (Directory)
 
 ```python
-# Declare directory target
-output_dir = coco.mount_run(
-    coco.component_subpath("setup", "output"),
-    localfs.declare_dir_target,
-    path=pathlib.Path("./output"),
-    create_parent_dirs=True,
-).result()
+# Mount directory target (async convenience)
+output_dir = await localfs.mount_dir_target(path=pathlib.Path("./output"))
 
 # Declare files within directory
 output_dir.declare_file("file1.txt", "content 1")

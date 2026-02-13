@@ -73,22 +73,89 @@ coco.mount(
 - Mount one component per item for fine-grained updates
 - Use stable paths for proper memoization
 
-### `coco.mount_run()`
+### `coco.use_mount()` / `coco_aio.use_mount()`
 
-Mount and immediately wait for component result.
+Mount a dependent component and return its result directly. The child component **cannot** refresh independently — re-executing the child requires re-executing the parent.
 
 ```python
-result = coco.mount_run(
-    path: ComponentPath,
-    func: Callable,
-    *args,
-    **kwargs,
-).result()
+# Async
+result = await coco_aio.use_mount(path, func, *args, **kwargs)
+
+# Sync
+result = coco.use_mount(path, func, *args, **kwargs)
 ```
 
+**Parameters:** Same as `mount()`.
+
+**Returns:** `T` — The return value of `func`.
+
 **Usage:**
-- Use for setup operations that return values (e.g., table targets)
-- Returns `ComponentHandle` with `.result()` method
+- Use when you need the return value of a child component
+- Replaces the old `mount_run(...).result()` pattern
+
+### `coco_aio.mount_each()`
+
+Mount one independent component per item in a keyed iterable. Sugar over a loop of `mount()` calls. **Async only.**
+
+```python
+await coco_aio.mount_each(fn, items, *args, **kwargs)
+```
+
+**Parameters:**
+- `fn` — The function to run for each item. The item value is passed as the first argument.
+- `items` — A keyed iterable of `(StableKey, T)` pairs (sync or async). The key becomes the component subpath.
+- `*args, **kwargs` — Additional arguments passed to `fn` after the item value.
+
+**Returns:** `ComponentMountHandle`
+
+**Usage:**
+```python
+files = localfs.walk_dir(sourcedir, recursive=True)
+await coco_aio.mount_each(process_file, files.items(), target_table)
+```
+
+### `coco_aio.mount_target()`
+
+Mount a target, ensuring its container target state is applied before returning the child `TargetStateProvider`. **Async only.**
+
+```python
+provider = await coco_aio.mount_target(target_state)
+```
+
+**Parameters:**
+- `target_state` — A `TargetState` with a child handler (from `TargetStateProvider.target_state(key, value)`).
+
+**Returns:** `TargetStateProvider` — The resolved child provider.
+
+**Usage:** Prefer connector convenience methods (`db.mount_table_target()`, `localfs.mount_dir_target()`) which call this internally. See [Connectors Reference](./connectors.md).
+
+### `coco_aio.map()`
+
+Run a function concurrently on each item. No processing components are created — pure concurrent execution within the current component. **Async only.**
+
+```python
+results = await coco_aio.map(fn, items, *args, **kwargs)
+```
+
+**Parameters:**
+- `fn` — Async function to apply to each item.
+- `items` — The items to iterate.
+- `*args, **kwargs` — Additional arguments passed to `fn` after the item.
+
+**Returns:** `list[T]` — Results from each invocation.
+
+**Usage:**
+```python
+await coco_aio.map(process_chunk, chunks, filename, id_gen, table)
+```
+
+### `coco.mount_run()` *(lower-level)*
+
+Mount and immediately wait for component result. Prefer `use_mount()` for new code.
+
+```python
+result = coco.mount_run(path, func, *args, **kwargs).result()
+```
 
 ### `coco.component_subpath()`
 
@@ -123,7 +190,7 @@ Use `with` for hierarchical organization:
 ```python
 with coco.component_subpath("setup"):
     # All mounts here are under "setup" path
-    table = coco.mount_run(...)
+    result = await coco_aio.use_mount(coco.component_subpath("init"), setup_fn)
 
 with coco.component_subpath("processing"):
     # All mounts here are under "processing" path
@@ -371,13 +438,8 @@ localfs.declare_file(
     create_parent_dirs: bool = False,
 )
 
-# Directory target
-dir_target = coco.mount_run(
-    coco.component_subpath("output"),
-    localfs.declare_dir_target,
-    path=Path("./output"),
-    create_parent_dirs=True,
-).result()
+# Directory target (async convenience)
+dir_target = await localfs.mount_dir_target(path=Path("./output"))
 
 dir_target.declare_file("file.txt", "content")
 ```
@@ -403,24 +465,24 @@ absolute = file_path.resolve()
 
 ```python
 # 1. Register database
-@coco.lifespan
+@coco_aio.lifespan
 async def coco_lifespan(builder):
     async with await connector.create_pool(URL) as pool:
         db = connector.register_db("db_key", pool)
         builder.provide(DB_CONTEXT_KEY, db)
         yield
 
-# 2. Declare table/collection target
+# 2. Mount table/collection target (async convenience method)
 @coco.function
-def app_main():
+async def app_main():
     db = coco.use_context(DB_CONTEXT_KEY)
 
-    target = coco.mount_run(
-        coco.component_subpath("setup", "table"),
-        db.declare_table_target,  # or declare_collection_target for Qdrant
+    target = await db.mount_table_target(
         table_name="my_table",
-        table_schema=Schema(...),
-    ).result()
+        table_schema=await connector.TableSchema.from_class(
+            MyRecord, primary_key=["id"],
+        ),
+    )
 
     # 3. Declare rows
     target.declare_row(row=MyRecord(...))
