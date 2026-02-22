@@ -49,40 +49,59 @@ def coco_lifespan(builder: coco.EnvironmentBuilder):
 
 ## Component Management
 
-### `coco.mount()`
+### `coco_aio.mount()` *(async — preferred)*
 
-Mount a processing component.
+Mount a processing component in the background. **Requires `await`.**
 
 ```python
-coco.mount(
-    path: ComponentPath,
+handle = await coco_aio.mount(
+    path: ComponentSubpath,
     func: Callable,
     *args,
     **kwargs,
 )
+await handle.ready()  # optional: wait until component finishes
 ```
 
 **Parameters:**
-- `path` - Component path (from `component_subpath()`)
+- `path` - Component subpath (from `component_subpath()`)
 - `func` - Function to execute
 - `*args, **kwargs` - Arguments to pass to function
 
-**Returns:** `ComponentHandle`
+**Returns:** `ComponentMountHandle` with `.ready()` (async)
 
 **Usage:**
-- Mount one component per item for fine-grained updates
-- Use stable paths for proper memoization
+- Default choice for mounting independent components
+- Prefer `mount_each()` when iterating over a list of items
 
-### `coco.use_mount()` / `coco_aio.use_mount()`
+### `coco.mount()` *(sync — CPU-bound leaf only)*
 
-Mount a dependent component and return its result directly. The child component **cannot** refresh independently — re-executing the child requires re-executing the parent.
+Mount a processing component synchronously. Use only when the component function performs **CPU-intensive work with no I/O**.
 
 ```python
-# Async
-result = await coco_aio.use_mount(path, func, *args, **kwargs)
+handle = coco.mount(
+    path: ComponentSubpath,
+    func: Callable,
+    *args,
+    **kwargs,
+)
+handle.wait_until_ready()  # optional: block until component finishes
+```
 
-# Sync
-result = coco.use_mount(path, func, *args, **kwargs)
+**Parameters:** Same as async `coco_aio.mount()`.
+
+**Returns:** `ComponentMountHandle` with `.wait_until_ready()` (sync)
+
+**Usage:**
+- Reserved for CPU-bound leaf functions (heavy computation, no I/O)
+- Use `coco_aio.mount()` for everything else
+
+### `coco_aio.use_mount()` *(async)*
+
+Mount a dependent component and return its result. The child component **cannot** refresh independently. **Requires `await`.**
+
+```python
+result = await coco_aio.use_mount(path, func, *args, **kwargs)
 ```
 
 **Parameters:** Same as `mount()`.
@@ -91,7 +110,16 @@ result = coco.use_mount(path, func, *args, **kwargs)
 
 **Usage:**
 - Use when you need the return value of a child component
-- Replaces the old `mount_run(...).result()` pattern
+
+### `coco.use_mount()` *(sync)*
+
+Synchronous version of `use_mount()`.
+
+```python
+result = coco.use_mount(path, func, *args, **kwargs)
+```
+
+**Returns:** `T` — The return value of `func`.
 
 ### `coco_aio.mount_each()`
 
@@ -149,14 +177,6 @@ results = await coco_aio.map(fn, items, *args, **kwargs)
 await coco_aio.map(process_chunk, chunks, filename, id_gen, table)
 ```
 
-### `coco.mount_run()` *(lower-level)*
-
-Mount and immediately wait for component result. Prefer `use_mount()` for new code.
-
-```python
-result = coco.mount_run(path, func, *args, **kwargs).result()
-```
-
 ### `coco.component_subpath()`
 
 Create a stable component path.
@@ -195,7 +215,7 @@ with coco.component_subpath("setup"):
 with coco.component_subpath("processing"):
     # All mounts here are under "processing" path
     for item in items:
-        coco.mount(coco.component_subpath(item.id), ...)
+        await coco_aio.mount(coco.component_subpath(item.id), ...)
 ```
 
 ---
@@ -538,15 +558,17 @@ class Record:
 
 ---
 
-## Async/Sync Flexibility
+## Async-First Approach
+
+CocoIndex v1 is async-first. Use async mounting by default; sync mounting is only for CPU-intensive leaf components.
 
 ### Import Strategy
 
 ```python
-# For async apps
+# For async apps (recommended)
 import cocoindex.asyncio as coco_aio
 
-# For sync apps
+# Sync mount is available on the main coco module
 import cocoindex as coco
 
 # Connectors and utilities work with both
@@ -554,20 +576,34 @@ from cocoindex.connectors import postgres, localfs
 from cocoindex.ops.text import RecursiveSplitter
 ```
 
-### Mixing Async and Sync
+### Mount Decision Guide
 
 ```python
-# Sync main can mount async components
-@coco.function
-def sync_main():
-    for item in items:
-        coco.mount(path, async_process, item)  # OK!
+# 1. List of items → always use mount_each (async)
+await coco_aio.mount_each(process_file, files.items(), table)
 
-# Async main can mount sync components
+# 2. Single component, general purpose → async mount
+await coco_aio.mount(coco.component_subpath("setup"), setup_fn)
+
+# 3. Need the return value → async use_mount
+result = await coco_aio.use_mount(coco.component_subpath("init"), init_fn)
+
+# 4. CPU-intensive leaf (no I/O) → sync mount is acceptable
+coco.mount(coco.component_subpath(item.id), cpu_heavy_fn, item)
+```
+
+### Sync Leaf with Async Orchestrator
+
+```python
+# ✅ Async app_main orchestrates sync CPU-bound leaf
 @coco.function
-async def async_main():
-    for item in items:
-        coco.mount(path, sync_process, item)  # OK!
+async def app_main(sourcedir):
+    await coco_aio.mount_each(cpu_transform, files.items(), outdir)
+
+@coco.function(memo=True)
+def cpu_transform(file, outdir):  # sync: pure CPU work
+    result = heavy_computation(file.read_bytes())
+    localfs.declare_file(outdir / file.file_path.path.name, result)
 ```
 
 ---

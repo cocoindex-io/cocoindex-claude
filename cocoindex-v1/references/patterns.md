@@ -36,12 +36,13 @@ Walk files → Transform content → Declare output files
 ```python
 import pathlib
 import cocoindex as coco
+import cocoindex.asyncio as coco_aio
 from cocoindex.connectors import localfs
 from cocoindex.resources.file import FileLike, PatternFilePathMatcher
 
 @coco.function(memo=True)
 def process_file(file: FileLike, outdir: pathlib.Path) -> None:
-    """Transform a single file."""
+    """Transform a single file. Sync is fine: pure CPU work, no I/O awaited."""
     content = file.read_text()
 
     # Transform (e.g., to uppercase)
@@ -53,8 +54,8 @@ def process_file(file: FileLike, outdir: pathlib.Path) -> None:
 
 
 @coco.function
-def app_main(sourcedir: pathlib.Path, outdir: pathlib.Path) -> None:
-    """Main processing function."""
+async def app_main(sourcedir: pathlib.Path, outdir: pathlib.Path) -> None:
+    """Main processing function — async orchestrator."""
     # Walk source directory
     files = localfs.walk_dir(
         sourcedir,
@@ -65,18 +66,12 @@ def app_main(sourcedir: pathlib.Path, outdir: pathlib.Path) -> None:
         ),
     )
 
-    # Process each file in its own component
-    for f in files:
-        coco.mount(
-            coco.component_subpath("file", str(f.file_path.path)),
-            process_file,
-            f,
-            outdir,
-        )
+    # Mount one component per file using mount_each
+    await coco_aio.mount_each(process_file, files.items(), outdir)
 
 
-app = coco.App(
-    coco.AppConfig(name="FileTransform"),
+app = coco_aio.App(
+    coco_aio.AppConfig(name="FileTransform"),
     app_main,
     sourcedir=pathlib.Path("./data"),
     outdir=pathlib.Path("./output"),
@@ -86,9 +81,9 @@ app = coco.App(
 ### Key Points
 
 - **`memo=True`**: Skip reprocessing unchanged files
-- **Component per file**: Each file gets its own processing component for independent updates
+- **`mount_each()`**: Mounts one component per file; keys from `files.items()` become component subpaths automatically
+- **Sync leaf**: `process_file` is sync because it does CPU work only — async app_main orchestrates it
 - **Auto-cleanup**: Deleting source file automatically removes output file
-- **Stable paths**: Use `str(f.file_path.path)` for stable component keys
 
 ---
 
@@ -322,9 +317,9 @@ async def app_main() -> None:
         table_name="source_records",
     )
 
-    # Process each record
+    # Process each record (async mount inside async for)
     async for record in source.iterate_async():
-        coco.mount(
+        await coco_aio.mount(
             coco.component_subpath("record", record.id),
             process_record,
             record,
@@ -472,9 +467,9 @@ async def app_main(input_texts: list[str]) -> None:
         ),
     )
 
-    # Process each input
+    # Process each input (async mount preferred)
     for idx, text in enumerate(input_texts):
-        coco.mount(
+        await coco_aio.mount(
             coco.component_subpath("text", idx),
             extract_and_store,
             text,
@@ -586,61 +581,65 @@ table = await target_db.mount_table_target(...)
 # Processing — mount_each uses keys as component subpaths
 await coco_aio.mount_each(process_item, items.items(), table)
 
-# Or use manual hierarchy
-with coco.component_subpath("processing"):
-    for item in items:
-        coco.mount(coco.component_subpath(item.id), ...)
+# Or use manual async loop
+for item in items:
+    await coco_aio.mount(coco.component_subpath(item.id), ...)
 ```
 
 ---
 
-## Pattern 7: Mixing Sync and Async
+## Pattern 7: Async-First — When to Use Sync Mount
 
-**Use case**: Use async for I/O-bound operations, sync for CPU-bound
+**Use case**: Async is the default. Sync `coco.mount()` is only for CPU-intensive leaf functions with no I/O.
 
-### Implementation
+### Async Orchestrator + Sync CPU Leaf (Recommended)
 
 ```python
-import asyncio
+import pathlib
 import cocoindex as coco
+import cocoindex.asyncio as coco_aio
 from cocoindex.connectors import localfs
 
 
+@coco.function(memo=True)
+def cpu_process(file, outdir: pathlib.Path) -> None:
+    """CPU-intensive leaf — sync is appropriate here."""
+    # Pure computation, no I/O awaited
+    result = expensive_computation(file.read_bytes())
+    localfs.declare_file(outdir / file.file_path.path.name, result)
+
+
 @coco.function
-async def fetch_data(url: str) -> dict:
-    """Async I/O operation."""
+async def app_main(sourcedir: pathlib.Path, outdir: pathlib.Path) -> None:
+    """Async orchestrator — use mount_each for lists."""
+    files = localfs.walk_dir(sourcedir, recursive=True)
+    await coco_aio.mount_each(cpu_process, files.items(), outdir)
+```
+
+### Async I/O Component
+
+```python
+@coco.function(memo=True)
+async def fetch_and_store(url: str, table) -> None:
+    """Async when doing I/O."""
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
-            return await response.json()
-
-
-@coco.function(memo=True)
-def process_data(data: dict) -> None:
-    """Sync CPU-bound operation."""
-    # Heavy computation
-    result = expensive_computation(data)
-    # Declare target state
-    localfs.declare_file("output.json", json.dumps(result))
+            data = await response.json()
+    table.declare_row(row=MyRecord(url=url, data=json.dumps(data)))
 
 
 @coco.function
-def app_main(urls: list[str]) -> None:
-    """Sync main can mount async components."""
-    for url in urls:
-        # Mount async component from sync context
-        coco.mount(
-            coco.component_subpath(url),
-            fetch_data,
-            url,
-        )
+async def app_main(urls: list[str]) -> None:
+    for idx, url in enumerate(urls):
+        await coco_aio.mount(coco.component_subpath("url", idx), fetch_and_store, url, table)
 ```
 
 ### Key Points
 
-- **Mount async from sync**: No restrictions on mixing
+- **Async by default**: Use `coco_aio.mount_each()` / `coco_aio.mount()` for all orchestration
+- **Sync leaf only**: Reserve `coco.mount()` for CPU-bound functions with no `await` calls
+- **Use async for I/O**: Network, database, file I/O should always be async
 - **Each component is consistent**: Keep each component either fully sync or fully async
-- **Use async for I/O**: Network requests, file I/O, database queries
-- **Use sync for CPU**: Heavy computation, data processing
 
 ---
 

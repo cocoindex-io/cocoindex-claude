@@ -120,15 +120,18 @@ if __name__ == "__main__":
 
 A **processing component** groups an item's processing with its target states.
 
-**Mount independent components** with `coco.mount()` or iterate with `coco_aio.mount_each()`:
+**Mount independent components** with `coco_aio.mount_each()` (preferred) or `coco_aio.mount()`:
 
 ```python
-# Mount one component per file (async sugar)
+# Preferred: mount one component per item (async, keyed iterable)
 await coco_aio.mount_each(process_file, files.items(), target_table)
 
-# Equivalent manual loop
-for f in files:
-    coco.mount(coco.component_subpath(str(f.file_path.path)), process_file, f, target_table)
+# Equivalent async manual loop
+for key, f in files.items():
+    await coco_aio.mount(coco.component_subpath(key), process_file, f, target_table)
+
+# Sync mount — only for CPU-intensive leaf components (no I/O)
+coco.mount(coco.component_subpath(str(f.file_path.path)), process_file, f, target_table)
 ```
 
 **Mount dependent components** with `use_mount()` when you need the return value:
@@ -149,7 +152,8 @@ target_table = await target_db.mount_table_target(
 **Key points**:
 
 - Each component runs independently
-- Use `mount()` / `mount_each()` for parallel processing, `use_mount()` when you need the result
+- **Async-first**: prefer `coco_aio.mount_each()` / `coco_aio.mount()` for all components; use sync `coco.mount()` only for CPU-intensive leaf work (no I/O)
+- Use `use_mount()` when you need the return value of a child component
 - Use stable paths for proper memoization
 - Component path determines target state ownership
 
@@ -229,19 +233,22 @@ Use `generate_id(dep)` when same content should yield same ID. Use `IdGenerator`
 Transform files from input to output directory:
 
 ```python
+import pathlib
 import cocoindex as coco
+import cocoindex.asyncio as coco_aio
 from cocoindex.connectors import localfs
 from cocoindex.resources.file import PatternFilePathMatcher
 
 @coco.function(memo=True)
 def process_file(file, outdir):
+    # CPU-bound transform — sync is fine here at the leaf
     content = file.read_text()
     transformed = transform_content(content)  # Your logic
     outname = file.file_path.path.stem + ".out"
     localfs.declare_file(outdir / outname, transformed, create_parent_dirs=True)
 
 @coco.function
-def app_main(sourcedir, outdir):
+async def app_main(sourcedir, outdir):
     files = localfs.walk_dir(
         sourcedir,
         recursive=True,
@@ -250,10 +257,9 @@ def app_main(sourcedir, outdir):
             excluded_patterns=[".*/**"],
         ),
     )
-    for f in files:
-        coco.mount(coco.component_subpath("file", str(f.file_path.path)), process_file, f, outdir)
+    await coco_aio.mount_each(process_file, files.items(), outdir)
 
-app = coco.App(coco.AppConfig(name="Transform"), app_main, sourcedir=Path("./data"), outdir=Path("./out"))
+app = coco_aio.App(coco_aio.AppConfig(name="Transform"), app_main, sourcedir=pathlib.Path("./data"), outdir=pathlib.Path("./out"))
 ```
 
 ### Pattern 2: Vector Embedding Pipeline
@@ -499,6 +505,27 @@ table = await target_db.mount_table_target(
 
 # Iterate with mount_each — keys become component subpaths
 await coco_aio.mount_each(process_item, items.items(), table)
+```
+
+### 6. Prefer Async Mount
+
+```python
+# ✅ Default: async mount for I/O-bound or general-purpose components
+@coco.function
+async def app_main(sourcedir):
+    await coco_aio.mount_each(process_file, files.items(), table)  # list of items
+    await coco_aio.mount(coco.component_subpath("setup"), setup_fn)  # single component
+
+# ✅ Sync mount only when the leaf function is CPU-intensive (no I/O)
+@coco.function(memo=True)
+def cpu_heavy_leaf(data: str) -> Result:
+    return expensive_computation(data)  # Pure CPU work, no async needed
+
+# ❌ Don't use sync mount inside async app_main for general components
+@coco.function
+async def app_main(sourcedir):
+    for key, f in files.items():
+        coco.mount(coco.component_subpath(key), process_file, f)  # Use await coco_aio.mount() instead
 ```
 
 ## Migration from Old API
